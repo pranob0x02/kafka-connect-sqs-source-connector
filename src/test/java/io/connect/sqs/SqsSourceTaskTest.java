@@ -17,6 +17,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -116,39 +117,34 @@ class SqsSourceTaskTest {
     }
 
     @Test
-    void shouldCommitAndDeleteMessages() throws Exception {
-        // For this test we need to use the real task logic for pendingMessages,
-        // but we can't easily access the private map.
-        // However, the real SqsSourceTask uses the real MessageProcessor if we don't
-        // mock it.
-        // But we want to test SqsSourceTask's commit logic.
-
-        // Let's use a real task but inject a mock SqsClient.
-        // The MessageProcessor will populate the pendingMessages map in the task.
-
+    void shouldDeleteMessageOnlyAfterKafkaAcknowledgesRecord() throws Exception {
         TestableTask testTask = new TestableTask(sqsClient);
         testTask.start(props);
+        when(sqsClient.receiveMessages()).thenReturn(createTestMessages(1));
 
-        // We need to simulate processing adding to pendingMessages.
-        // Since we can't easily access the internal map from test, we rely on the fact
-        // that
-        // the real MessageProcessor (which is created inside start()) shares the map
-        // reference.
+        List<SourceRecord> records = testTask.poll();
+        verify(sqsClient, after(200).never()).deleteMessages(anyList());
 
-        // Actually, TestableTask creates its own helpers if we don't provide them.
-        // But we need to intercept receiveMessages.
+        testTask.commitRecord(records.get(0), null);
 
-        List<Message> messages = createTestMessages(1);
-        when(sqsClient.receiveMessages()).thenReturn(messages);
+        verify(sqsClient, timeout(5000)).deleteMessages(argThat(batch -> messageIds(batch).equals(List.of("msg-1"))));
+        testTask.stop();
+    }
 
-        // Poll to populate pending messages
-        testTask.poll();
+    @Test
+    void shouldKeepUnacknowledgedMessagesPending() throws Exception {
+        TestableTask testTask = new TestableTask(sqsClient);
+        testTask.start(props);
+        when(sqsClient.receiveMessages()).thenReturn(createTestMessages(2));
 
-        // Commit
-        testTask.commit();
+        List<SourceRecord> records = testTask.poll();
 
-        // Verify delete was called
-        verify(sqsClient).deleteMessages(anyList());
+        testTask.commitRecord(records.get(0), null);
+        verify(sqsClient, timeout(5000)).deleteMessages(argThat(batch -> messageIds(batch).equals(List.of("msg-1"))));
+
+        testTask.commitRecord(records.get(1), null);
+        verify(sqsClient, timeout(5000)).deleteMessages(argThat(batch -> messageIds(batch).equals(List.of("msg-2"))));
+        testTask.stop();
     }
 
     @Test
@@ -171,6 +167,10 @@ class SqsSourceTaskTest {
                     .build());
         }
         return messages;
+    }
+
+    private static List<String> messageIds(List<Message> batch) {
+        return batch.stream().map(Message::messageId).collect(Collectors.toList());
     }
 
     private Map<String, String> getTestConfig() {
@@ -201,6 +201,11 @@ class SqsSourceTaskTest {
             this.mockSqsClient = mockSqsClient;
             this.mockMessagePoller = mockMessagePoller;
             this.mockMessageProcessor = mockMessageProcessor;
+        }
+
+        @Override
+        SqsClient createSqsClient(SqsSourceConnectorConfig config) {
+            return mockSqsClient;
         }
 
         @Override

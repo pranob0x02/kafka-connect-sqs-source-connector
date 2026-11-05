@@ -14,9 +14,12 @@ public class DeduplicationTracker {
 
     private static final Logger log = LoggerFactory.getLogger(DeduplicationTracker.class);
 
+    private static final long CLEANUP_INTERVAL_MS = 1000L;
+
     // Maps deduplication ID to expiration timestamp
     private final Map<String, Long> deduplicationIds = new ConcurrentHashMap<>();
     private final long windowMs;
+    private volatile long nextCleanupTime = 0L;
 
     /**
      * Creates a DeduplicationTracker with the specified window.
@@ -41,7 +44,11 @@ public class DeduplicationTracker {
         }
 
         long currentTime = System.currentTimeMillis();
-        cleanupExpired(currentTime);
+        // The cleanup scans every entry, so throttle it; the expiry check below already ignores stale entries
+        if (currentTime >= nextCleanupTime) {
+            nextCleanupTime = currentTime + CLEANUP_INTERVAL_MS;
+            cleanupExpired(currentTime);
+        }
 
         // Check if ID exists and is not expired
         Long expirationTime = deduplicationIds.get(deduplicationId);

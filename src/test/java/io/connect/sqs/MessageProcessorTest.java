@@ -39,6 +39,8 @@ class MessageProcessorTest {
     private DeduplicationTracker deduplicationTracker;
     @Mock
     private DlqSender dlqSender;
+    @Mock
+    private MessageDeleter messageDeleter;
 
     private SqsSourceConnectorConfig config;
     private MessageProcessor messageProcessor;
@@ -71,7 +73,7 @@ class MessageProcessorTest {
         messagesInRetry = new ConcurrentHashMap<>();
 
         messageProcessor = new MessageProcessor(
-                config, messageConverter, retryManager, deduplicationTracker, dlqSender,
+                config, messageConverter, retryManager, deduplicationTracker, dlqSender, messageDeleter,
                 messagesFailed, messagesRetried, messagesDeduplicated,
                 pendingMessages, messagesInRetry);
     }
@@ -132,6 +134,40 @@ class MessageProcessorTest {
         assertThat(records).hasSize(1);
         assertThat(records.get(0)).isEqualTo(dlqRecord);
         assertThat(pendingMessages).containsKey("msg-1"); // Should be pending for deletion
+        verify(messageDeleter, never()).delete(any());
+    }
+
+    @Test
+    void shouldDeleteDuplicateImmediately() {
+        Message msg = Message.builder().messageId("msg-1").body("body")
+                .attributesWithStrings(Map.of("MessageDeduplicationId", "dedup-1"))
+                .build();
+
+        when(retryManager.canRetryNow(anyString())).thenReturn(true);
+        when(deduplicationTracker.isDuplicate("dedup-1")).thenReturn(true);
+
+        List<SourceRecord> records = messageProcessor.processMessages(List.of(msg));
+
+        assertThat(records).isEmpty();
+        assertThat(pendingMessages).isEmpty();
+        assertThat(messagesDeduplicated.get()).isEqualTo(1);
+        verify(messageDeleter).delete(msg);
+    }
+
+    @Test
+    void shouldDeleteFailedMessageImmediatelyWhenNoDlq() {
+        Message msg = Message.builder().messageId("msg-1").body("body").build();
+
+        when(retryManager.canRetryNow(anyString())).thenReturn(true);
+        when(messageConverter.convert(any(), any())).thenThrow(new RuntimeException("fail"));
+        when(retryManager.recordFailure(anyString(), any())).thenReturn(RetryDecision.routeToDlq("msg-1", 3));
+        when(dlqSender.createDlqRecord(any(), any(), eq(3))).thenReturn(null);
+
+        List<SourceRecord> records = messageProcessor.processMessages(List.of(msg));
+
+        assertThat(records).isEmpty();
+        assertThat(pendingMessages).isEmpty();
+        verify(messageDeleter).delete(msg);
     }
 
     static Stream<String> randomStringProvider() {

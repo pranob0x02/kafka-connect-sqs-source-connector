@@ -54,6 +54,21 @@ public class SqsSourceConnectorConfig extends AbstractConfig {
     public static final String AWS_ENDPOINT_OVERRIDE_CONFIG = "aws.endpoint.override";
     private static final String AWS_ENDPOINT_OVERRIDE_DOC = "Override AWS SQS endpoint (useful for LocalStack or custom endpoints)";
 
+    // AWS Secrets Manager Configuration
+    public static final String AWS_SECRETS_MANAGER_SECRET_ARN_CONFIG = "aws.secrets.manager.secret.arn";
+    private static final String AWS_SECRETS_MANAGER_SECRET_ARN_DOC = "ARN or name of the AWS Secrets Manager secret containing SQS credentials (access key and secret key as JSON fields)";
+
+    public static final String AWS_SECRETS_MANAGER_REGION_CONFIG = "aws.secrets.manager.region";
+    private static final String AWS_SECRETS_MANAGER_REGION_DOC = "AWS region where the Secrets Manager secret is stored. Defaults to aws.region if not specified";
+
+    public static final String AWS_SECRETS_MANAGER_ACCESS_KEY_FIELD_CONFIG = "aws.secrets.manager.access.key.field";
+    private static final String AWS_SECRETS_MANAGER_ACCESS_KEY_FIELD_DOC = "JSON field name in the secret containing the AWS access key ID";
+    private static final String AWS_SECRETS_MANAGER_ACCESS_KEY_FIELD_DEFAULT = "aws_access_key_id";
+
+    public static final String AWS_SECRETS_MANAGER_SECRET_KEY_FIELD_CONFIG = "aws.secrets.manager.secret.key.field";
+    private static final String AWS_SECRETS_MANAGER_SECRET_KEY_FIELD_DOC = "JSON field name in the secret containing the AWS secret access key";
+    private static final String AWS_SECRETS_MANAGER_SECRET_KEY_FIELD_DEFAULT = "aws_secret_access_key";
+
     // S3-specific Credentials Configuration (for Claim Check Pattern)
     public static final String S3_ASSUME_ROLE_ARN_CONFIG = "s3.assume.role.arn";
     private static final String S3_ASSUME_ROLE_ARN_DOC = "AWS IAM role ARN to assume for S3 access (claim check pattern). If not set, falls back to aws.assume.role.arn";
@@ -359,6 +374,54 @@ public class SqsSourceConnectorConfig extends AbstractConfig {
                 ++awsGroupOrder,
                 Width.LONG,
                 "AWS Endpoint Override"
+        );
+
+        configDef.define(
+                AWS_SECRETS_MANAGER_SECRET_ARN_CONFIG,
+                Type.STRING,
+                null,
+                Importance.MEDIUM,
+                AWS_SECRETS_MANAGER_SECRET_ARN_DOC,
+                awsGroup,
+                ++awsGroupOrder,
+                Width.LONG,
+                "Secrets Manager Secret ARN"
+        );
+
+        configDef.define(
+                AWS_SECRETS_MANAGER_REGION_CONFIG,
+                Type.STRING,
+                null,
+                Importance.LOW,
+                AWS_SECRETS_MANAGER_REGION_DOC,
+                awsGroup,
+                ++awsGroupOrder,
+                Width.MEDIUM,
+                "Secrets Manager Region"
+        );
+
+        configDef.define(
+                AWS_SECRETS_MANAGER_ACCESS_KEY_FIELD_CONFIG,
+                Type.STRING,
+                AWS_SECRETS_MANAGER_ACCESS_KEY_FIELD_DEFAULT,
+                Importance.LOW,
+                AWS_SECRETS_MANAGER_ACCESS_KEY_FIELD_DOC,
+                awsGroup,
+                ++awsGroupOrder,
+                Width.MEDIUM,
+                "Secrets Manager Access Key Field"
+        );
+
+        configDef.define(
+                AWS_SECRETS_MANAGER_SECRET_KEY_FIELD_CONFIG,
+                Type.STRING,
+                AWS_SECRETS_MANAGER_SECRET_KEY_FIELD_DEFAULT,
+                Importance.LOW,
+                AWS_SECRETS_MANAGER_SECRET_KEY_FIELD_DOC,
+                awsGroup,
+                ++awsGroupOrder,
+                Width.MEDIUM,
+                "Secrets Manager Secret Key Field"
         );
 
         configDef.define(
@@ -1095,6 +1158,23 @@ public class SqsSourceConnectorConfig extends AbstractConfig {
 
     public String getAwsEndpointOverride() {
         return getString(AWS_ENDPOINT_OVERRIDE_CONFIG);
+    }
+
+    public String getAwsSecretsManagerSecretArn() {
+        return getString(AWS_SECRETS_MANAGER_SECRET_ARN_CONFIG);
+    }
+
+    public String getAwsSecretsManagerRegion() {
+        String smRegion = getString(AWS_SECRETS_MANAGER_REGION_CONFIG);
+        return (smRegion != null && !smRegion.trim().isEmpty()) ? smRegion : getAwsRegion();
+    }
+
+    public String getAwsSecretsManagerAccessKeyField() {
+        return getString(AWS_SECRETS_MANAGER_ACCESS_KEY_FIELD_CONFIG);
+    }
+
+    public String getAwsSecretsManagerSecretKeyField() {
+        return getString(AWS_SECRETS_MANAGER_SECRET_KEY_FIELD_CONFIG);
     }
 
     public String getSqsQueueUrl() {

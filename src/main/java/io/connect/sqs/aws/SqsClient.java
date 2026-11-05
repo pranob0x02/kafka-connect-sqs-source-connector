@@ -198,11 +198,26 @@ public class SqsClient implements AutoCloseable {
         String profileName = config.getAwsCredentialsProfile();
         String credentialsFilePath = config.getAwsCredentialsFilePath();
         String assumeRoleArn = config.getAwsAssumeRoleArn();
+        String secretsManagerArn = config.getAwsSecretsManagerSecretArn();
+
+        log.info("Credential resolution — secrets.manager.arn={}, access.key.id={}", 
+                secretsManagerArn != null ? secretsManagerArn : "null",
+                accessKeyId != null ? accessKeyId.substring(0, Math.min(4, accessKeyId.length())) + "..." : "null");
 
         AwsCredentialsProvider baseProvider;
 
+        // Priority 0: AWS Secrets Manager (highest priority for managed credentials)
+        if (secretsManagerArn != null && !secretsManagerArn.trim().isEmpty()) {
+            log.info("Using AWS Secrets Manager for credentials: {}", secretsManagerArn);
+            SecretsManagerCredentialResolver resolver = new SecretsManagerCredentialResolver(
+                    config.getAwsSecretsManagerRegion());
+            baseProvider = resolver.resolve(
+                    secretsManagerArn,
+                    config.getAwsSecretsManagerAccessKeyField(),
+                    config.getAwsSecretsManagerSecretKeyField());
+        }
         // Priority 1: Static credentials (highest priority for explicit configuration)
-        if (accessKeyId != null && secretAccessKey != null) {
+        else if (accessKeyId != null && secretAccessKey != null) {
             log.info("Using static AWS credentials (access key + secret key)");
             log.info("Deployment: Any environment (cloud-agnostic, bare metal, on-premises)");
             baseProvider = StaticCredentialsProvider.create(

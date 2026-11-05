@@ -31,6 +31,7 @@ import software.amazon.awssdk.services.sqs.model.*;
 
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -344,23 +345,16 @@ class SqsToKafkaE2EIT {
                     log.info("Polled {} records from connector (attempt {})", records.size(), pollAttempts + 1);
                     consecutiveEmptyPolls = 0; // Reset counter
 
-                    // Produce records to Kafka
+                    // Produce records to Kafka and acknowledge each one, like the Connect framework does
                     for (SourceRecord record : records) {
                         ProducerRecord<String, String> producerRecord = new ProducerRecord<>(
                                 record.topic(),
                                 (String) record.key(),
                                 (String) record.value()
                         );
-                        kafkaProducer.send(producerRecord);
+                        task.commitRecord(record, kafkaProducer.send(producerRecord).get());
                         totalMessagesProcessed++;
                     }
-
-                    // Commit the records
-                    Map<String, Object> offset = new HashMap<>();
-                    for (SourceRecord record : records) {
-                        offset.put(record.sourcePartition().toString(), record.sourceOffset());
-                    }
-                    task.commit();
 
                     log.info("Produced {} messages to Kafka (total: {})", records.size(), totalMessagesProcessed);
                 } else {
@@ -387,6 +381,8 @@ class SqsToKafkaE2EIT {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Interrupted while processing messages", e);
+        } catch (ExecutionException e) {
+            throw new RuntimeException("Failed to produce message to Kafka", e);
         } finally {
             // Stop the task and connector
             task.stop();

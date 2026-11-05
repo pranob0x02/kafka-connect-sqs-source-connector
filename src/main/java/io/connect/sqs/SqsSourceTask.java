@@ -6,6 +6,7 @@ import io.connect.sqs.converter.MessageConverter;
 import io.connect.sqs.fifo.DeduplicationTracker;
 import io.connect.sqs.retry.RetryManager;
 import io.connect.sqs.util.VersionUtil;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTask;
@@ -13,7 +14,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.sqs.model.Message;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,8 +27,11 @@ public class SqsSourceTask extends SourceTask {
 
     private static final Logger log = LoggerFactory.getLogger(SqsSourceTask.class);
 
+    private static final String SOURCE_OFFSET_MESSAGE_ID = "message_id";
+
     private SqsSourceConnectorConfig config;
     private SqsClient sqsClient;
+    private MessageDeleter messageDeleter;
     private MessageConverter messageConverter;
     private RetryManager retryManager;
     private DeduplicationTracker deduplicationTracker;
@@ -38,7 +41,7 @@ public class SqsSourceTask extends SourceTask {
     private MessageProcessor messageProcessor;
     private DlqSender dlqSender;
 
-    // Track processed messages for commit
+    // Messages turned into records that Kafka has not acknowledged yet
     private final Map<String, Message> pendingMessages = new ConcurrentHashMap<>();
 
     // Track messages pending retry (not visible in SQS yet due to visibility
@@ -66,7 +69,7 @@ public class SqsSourceTask extends SourceTask {
             this.config = new SqsSourceConnectorConfig(props);
 
             // Initialize SQS client
-            this.sqsClient = new SqsClient(config);
+            this.sqsClient = createSqsClient(config);
 
             // Initialize message converter
             this.messageConverter = createMessageConverter();
@@ -87,8 +90,9 @@ public class SqsSourceTask extends SourceTask {
             // Initialize helpers
             this.messagePoller = new MessagePoller(sqsClient, config, messagesReceived, messagesDeleted);
             this.dlqSender = new DlqSender(config);
+            this.messageDeleter = new MessageDeleter(sqsClient, messagesDeleted);
             this.messageProcessor = new MessageProcessor(
-                    config, messageConverter, retryManager, deduplicationTracker, dlqSender,
+                    config, messageConverter, retryManager, deduplicationTracker, dlqSender, messageDeleter,
                     messagesFailed, messagesRetried, messagesDeduplicated,
                     pendingMessages, messagesInRetry);
 
@@ -139,34 +143,21 @@ public class SqsSourceTask extends SourceTask {
         }
     }
 
+    /**
+     * Called on the producer callback thread once Kafka has the record (metadata is null if it was dropped).
+     * Deleting right away matters for FIFO queues: a message group stays locked until its messages are deleted.
+     */
     @Override
-    public void commit() throws InterruptedException {
-        log.debug("Committing processed messages");
-
-        if (config.isSqsDeleteMessages() && !pendingMessages.isEmpty()) {
-            try {
-                List<Message> toDelete = new ArrayList<>(pendingMessages.values());
-                sqsClient.deleteMessages(toDelete);
-
-                messagesDeleted.addAndGet(toDelete.size());
-                log.debug("Deleted {} messages from SQS", toDelete.size());
-
-                pendingMessages.clear();
-
-            } catch (Exception e) {
-                log.error("Failed to delete messages from SQS", e);
-                // Don't throw exception here to avoid stopping the connector
-                // Messages will become visible again after visibility timeout
-            }
-        } else {
-            pendingMessages.clear();
+    public void commitRecord(SourceRecord record, RecordMetadata metadata) {
+        Object messageId = record.sourceOffset() != null ? record.sourceOffset().get(SOURCE_OFFSET_MESSAGE_ID) : null;
+        Message message = messageId != null ? pendingMessages.remove(messageId.toString()) : null;
+        if (message == null) {
+            log.warn("No pending SQS message for acknowledged record with source offset {}", record.sourceOffset());
+            return;
         }
-    }
-
-    @Override
-    public void commitRecord(SourceRecord record) throws InterruptedException {
-        // Individual record commit - called before commit()
-        log.trace("Committing individual record: {}", record);
+        if (config.isSqsDeleteMessages()) {
+            messageDeleter.delete(message);
+        }
     }
 
     @Override
@@ -174,6 +165,10 @@ public class SqsSourceTask extends SourceTask {
         log.info("Stopping SQS Source Task");
 
         logMetrics();
+
+        if (messageDeleter != null) {
+            messageDeleter.close();
+        }
 
         if (sqsClient != null) {
             try {
@@ -225,6 +220,9 @@ public class SqsSourceTask extends SourceTask {
         log.info("  Messages Retried: {}", messagesRetried.get());
         log.info("  Messages Deduplicated: {}", messagesDeduplicated.get());
         log.info("  Pending Messages: {}", pendingMessages.size());
+        if (messageDeleter != null) {
+            log.info("  Messages Queued For Delete: {}", messageDeleter.getQueuedCount());
+        }
         log.info("  Messages In Retry: {}", messagesInRetry.size());
         if (deduplicationTracker != null) {
             log.info("  Deduplication Tracker Size: {}", deduplicationTracker.getTrackedCount());
@@ -234,6 +232,11 @@ public class SqsSourceTask extends SourceTask {
             log.info("  Messages Filtered Out: {}", messagePoller.getMessageFilterProcessor().getMessagesFiltered());
             log.info("  Messages Passed Filter: {}", messagePoller.getMessageFilterProcessor().getMessagesPassed());
         }
+    }
+
+    // Overridden in tests to inject a mock client
+    SqsClient createSqsClient(SqsSourceConnectorConfig config) {
+        return new SqsClient(config);
     }
 
     /**

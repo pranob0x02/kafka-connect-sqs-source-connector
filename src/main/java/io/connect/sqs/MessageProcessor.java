@@ -27,6 +27,7 @@ public class MessageProcessor {
     private final RetryManager retryManager;
     private final DeduplicationTracker deduplicationTracker;
     private final DlqSender dlqSender;
+    private final MessageDeleter messageDeleter;
 
     // Metrics references
     private final AtomicLong messagesFailed;
@@ -43,6 +44,7 @@ public class MessageProcessor {
             RetryManager retryManager,
             DeduplicationTracker deduplicationTracker,
             DlqSender dlqSender,
+            MessageDeleter messageDeleter,
             AtomicLong messagesFailed,
             AtomicLong messagesRetried,
             AtomicLong messagesDeduplicated,
@@ -53,6 +55,7 @@ public class MessageProcessor {
         this.retryManager = retryManager;
         this.deduplicationTracker = deduplicationTracker;
         this.dlqSender = dlqSender;
+        this.messageDeleter = messageDeleter;
         this.messagesFailed = messagesFailed;
         this.messagesRetried = messagesRetried;
         this.messagesDeduplicated = messagesDeduplicated;
@@ -79,7 +82,7 @@ public class MessageProcessor {
                     messagesDeduplicated.incrementAndGet();
                     // Delete duplicate message from SQS
                     if (config.isSqsDeleteMessages()) {
-                        pendingMessages.put(message.messageId(), message);
+                        messageDeleter.delete(message);
                     }
                     continue;
                 }
@@ -87,7 +90,7 @@ public class MessageProcessor {
                 SourceRecord record = messageConverter.convert(message, config);
                 records.add(record);
 
-                // Track pending message for later deletion
+                // Deleted by SqsSourceTask.commitRecord once Kafka acknowledges the record
                 pendingMessages.put(message.messageId(), message);
 
                 // Clear retry tracking for successfully processed message
@@ -179,32 +182,10 @@ public class MessageProcessor {
             log.warn("No DLQ configured for failed message: {} after {} retries",
                     message.messageId(), retryCount);
 
-            // Note: Deletion is handled by the caller adding to pendingMessages if we
-            // return a record,
-            // but here we return null so we need to handle deletion if configured.
-            // HOWEVER, the logic in SqsSourceTask was:
-            // if (dlqRecord != null) { records.add(dlqRecord); pendingMessages.put(...) }
-            // else { if (delete) { deleteMessages(...) } }
-            // So we need to replicate that behavior or change the contract.
-            // Let's stick to returning the record if DLQ is enabled.
-            // If DLQ is NOT enabled, we return null. The caller won't add anything to
-            // records.
-            // But we still need to delete the message if configured.
-
-            // Wait, SqsSourceTask logic for no DLQ was:
-            // if (config.isSqsDeleteMessages()) { sqsClient.deleteMessages(...) }
-            // Since we don't have sqsClient here, we can't delete immediately.
-            // We should probably return a special "Empty" record or handle this
-            // differently.
-            // OR we can just add it to pendingMessages and let the commit loop handle it?
-            // But commit loop only deletes pendingMessages.
-            // If we add it to pendingMessages but don't return a record, it will be deleted
-            // on next commit.
-            // That seems correct.
-
+            // No record will reach Kafka, so no acknowledgement will trigger the delete later
             if (config.isSqsDeleteMessages()) {
-                pendingMessages.put(message.messageId(), message);
-                log.debug("Marked failed message {} for deletion", message.messageId());
+                messageDeleter.delete(message);
+                log.debug("Deleting failed message {}", message.messageId());
             }
         }
 
